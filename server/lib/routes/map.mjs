@@ -17,10 +17,18 @@
  * The posting's location can be a metro label or plain wrong (LinkedIn says
  * Stuttgart for a job in Turin), so the map tries `workplace` first and falls
  * back to `location` when it does not geocode to a settlement.
+ *
+ *   GET /api/commute → { home, maxMinutes, byUrl: {urlKey: c}, byNum: {num: c} }
+ *
+ * Car commute per posting, c = {min, km, precision, lat, lon}, from the
+ * parent's data/commute.tsv (written by the homelab's commute.mjs, keyed by
+ * posting URL) and `commute: {home, max_minutes}` in config/profile.yml.
+ * byNum covers tracker rows whose URL only lives in their report.
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
-import { PATHS } from '../paths.mjs';
+import yaml from 'js-yaml';
+import { PATHS, path as projPath } from '../paths.mjs';
 import { parsePipelineRows, parseReportHeader } from '../parsers.mjs';
 import { safeReadApps } from '../store.mjs';
 import { titleFit, loadProfileTargetRoles } from '../title-fit.mjs';
@@ -97,7 +105,44 @@ export function tileConfig(env = process.env) {
   };
 }
 
+/** Host+path, lower-case, no trailing slash — the same key as the map client's urlKey(). */
+export function urlKey(u) {
+  try { const x = new URL(u); return (x.host + x.pathname).replace(/\/+$/, '').toLowerCase(); } catch { return ''; }
+}
+
+/** data/commute.tsv → Map(urlKey → {min, km, precision, lat, lon}); numbers or null. */
+export function parseCommute(tsv) {
+  const [head, ...lines] = String(tsv || '').split(/\r?\n/);
+  const cols = (head || '').split('\t');
+  const num = (v) => (v === '' || v == null || !Number.isFinite(+v) ? null : +v);
+  const out = new Map();
+  for (const l of lines) {
+    if (!l) continue;
+    const r = Object.fromEntries(l.split('\t').map((v, i) => [cols[i], v]));
+    const k = urlKey(r.url);
+    if (k) out.set(k, { min: num(r.min), km: num(r.km), precision: r.precision || 'unknown', lat: num(r.lat), lon: num(r.lon) });
+  }
+  return out;
+}
+
+function commuteConfig() {
+  try {
+    const c = (yaml.load(read(PATHS.profile)) || {}).commute || {};
+    return { home: typeof c.home === 'string' ? c.home : '', maxMinutes: Number(c.max_minutes) || null };
+  } catch { return { home: '', maxMinutes: null }; }
+}
+
 export function registerMapRoutes(app) {
+  app.get('/api/commute', (_req, res) => {
+    const byKey = parseCommute(read(projPath('data', 'commute.tsv')));
+    const byNum = {};
+    for (const r of safeReadApps()) {
+      const c = byKey.get(urlKey(r.url || reportUrl(r.reportPath)));
+      if (c && r.num) byNum[r.num] = c;
+    }
+    res.json({ ...commuteConfig(), byUrl: Object.fromEntries(byKey), byNum });
+  });
+
   app.get('/api/map/jobs', (_req, res) => {
     const pending = parsePipelineRows(read(PATHS.pipeline));
     const idx = buildLocationIndex({

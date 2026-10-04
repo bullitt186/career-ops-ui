@@ -81,11 +81,20 @@
     const t = (k, f) => I18n.t(k, f);
     const myGen = ++gen;
 
-    const [scan, jobs, tp] = await Promise.all([
+    const [scan, jobs, tp, commute] = await Promise.all([
       API.get('/api/scan-results').catch(() => ({})),
       API.get('/api/map/jobs').catch(() => ({ pipeline: [], tracker: [] })),
       API.get('/api/two-pager').catch(() => ({})),
+      API.get('/api/commute').catch(() => null),
     ]);
+    // Car commute (homelab commute.mjs): tooltip line, drive-time filter, and for
+    // address-level rows the position itself — no second geocode.
+    const byUrl = (commute && commute.byUrl) || {};
+    const byNum = (commute && commute.byNum) || {};
+    const maxMin = commute && commute.maxMinutes;
+    const driveLine = (cm) => (!cm ? '' : cm.precision === 'remote' ? '🚗 ' + t('commute.remote', 'Remote')
+      : cm.min == null ? '' : '🚗 ' + cm.min + ' min' + (cm.km != null ? ' · ' + cm.km + ' km' : '')
+        + (maxMin && cm.min > maxMin ? ' ⚠️' : ''));
     const twoPager = tp && tp.twoPager;
 
     const scanRows = [];
@@ -99,11 +108,12 @@
     const points = [];
     const fitPoint = (layer, r, href) => {
       const { band, label } = fitOf(r, twoPager);
+      const cm = byUrl[urlKey(href)] || null;
       points.push({
-        layer, places: [r.location], company: r.company, filled: false,
+        layer, places: [r.location], company: r.company, filled: false, commute: cm,
         color: FIT_COLORS[band], rank: FIT_RANK[band], label: label ? t('map.fit', 'Fit') + ': ' + label : '',
         title: r.title, lines: [r.company, r.location,
-          [r.workplaceType || (r.isRemote ? 'Remote' : ''), r.salary].filter(Boolean).join(' · ')],
+          [r.workplaceType || (r.isRemote ? 'Remote' : ''), r.salary].filter(Boolean).join(' · '), driveLine(cm)],
         open: openUrl(href),
       });
     };
@@ -120,11 +130,14 @@
       const places = r.workplace
         ? [region ? r.workplace + ', ' + region : '', r.workplace, location]
         : [location];
+      const cm = byNum[r.num] || byUrl[urlKey(r.href)] || null;
+      const exact = cm && cm.lat != null && (cm.precision === 'address' || cm.precision === 'poi');
       points.push({
-        layer: 'tracker', places, company: r.company, filled: true,
+        layer: 'tracker', places, company: r.company, filled: true, commute: cm,
+        ...(exact ? { lat: cm.lat, lon: cm.lon, exact: true, fixed: true } : {}),
         color: SCORE_COLORS[s.tone] || SCORE_COLORS.none, rank: 100 + s.num,
         label: s.label ? t('map.score', 'Score') + ': ' + s.label : '',
-        title: r.role, lines: [r.company, r.workplace || location, r.status],
+        title: r.role, lines: [r.company, r.workplace || location, r.status, driveLine(cm)],
         open: r.reportPath
           ? () => Router.go('/reports/' + r.reportPath.replace(/^(\.\.\/)*reports\//, '').replace(/\.md$/, ''))
           : openUrl(r.href),
@@ -162,6 +175,46 @@
         [t('map.layerTracker', 'Tracker')]: toggles.tracker,
       }, { collapsed: false }).addTo(map);
       const drawn = L.layerGroup().addTo(map);
+
+      // Drive-time filter: remote always shown, unknown drive time only when ticked.
+      let limit = 0;
+      let showUnknown = true;
+      const passes = (p) => {
+        if (!limit) return true;
+        const cm = p.commute;
+        if (!cm || cm.min == null) return (cm && cm.precision === 'remote') || showUnknown;
+        return cm.min <= limit;
+      };
+      if (commute && (Object.keys(byUrl).length || Object.keys(byNum).length)) {
+        const ctl = L.control({ position: 'topleft' });
+        ctl.onAdd = () => {
+          const box = L.DomUtil.create('div', 'job-map-legend');
+          L.DomEvent.disableClickPropagation(box);
+          const sel = L.DomUtil.create('select', 'select', box);
+          sel.setAttribute('aria-label', t('commute.col.time', 'Drive'));
+          const opts = [[0, t('commute.any', 'Any drive time')]];
+          if (maxMin) opts.push([maxMin, t('commute.max', '≤ {n} min (profile)').replace('{n}', maxMin)]);
+          for (const n of [30, 45, 60, 90]) if (n !== maxMin) opts.push([n, t('commute.upTo', '≤ {n} min').replace('{n}', n)]);
+          for (const [v, txt] of opts) { const o = L.DomUtil.create('option', '', sel); o.value = String(v); o.textContent = txt; }
+          const lab = L.DomUtil.create('label', '', box);
+          lab.style.display = 'block';
+          const cb = L.DomUtil.create('input', '', lab);
+          cb.type = 'checkbox'; cb.checked = true;
+          lab.appendChild(document.createTextNode(' ' + t('commute.unknown', 'Show unknown drive time')));
+          sel.addEventListener('change', () => { limit = Number(sel.value) || 0; render(); });
+          cb.addEventListener('change', () => { showUnknown = cb.checked; render(); });
+          return box;
+        };
+        ctl.addTo(map);
+      }
+      if (commute && commute.home) {
+        API.get('/api/geocode?q=' + encodeURIComponent(commute.home)).then((pos) => {
+          if (!pos || pos.lat == null || myGen !== gen) return;
+          L.marker([pos.lat, pos.lon], {
+            icon: L.divIcon({ html: '🏠', className: 'job-map-home', iconSize: [22, 22] }), keyboard: false, zIndexOffset: 1000,
+          }).bindTooltip(t('map.home', 'Home')).addTo(map);
+        }).catch(() => {});
+      }
       // Stop auto-fitting once the user pans/zooms themselves.
       let userMoved = false;
 
@@ -217,7 +270,7 @@
       function render() {
         drawn.clearLayers();
         const zoom = map.getZoom();
-        const visible = points.filter((p) => p.lat != null && map.hasLayer(toggles[p.layer]))
+        const visible = points.filter((p) => p.lat != null && map.hasLayer(toggles[p.layer]) && passes(p))
           .sort((a, b) => b.rank - a.rank);
         // Spread postings sharing a coordinate; best one stays at the centre.
         const seen = new Map();
@@ -253,6 +306,7 @@
       const byKey = new Map();
       let noLoc = 0;
       for (const p of points) {
+        if (p.fixed) continue;                 // positioned from commute.tsv already
         p.places = [...new Set(p.places.map((x) => String(x || '').trim()).filter(Boolean))];
         if (!p.places.length) { noLoc++; continue; }
         const k = JSON.stringify([p.places, p.company || '']);

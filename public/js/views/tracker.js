@@ -6,9 +6,11 @@ Router.register('tracker', async () => {
   // the canonical funnel are fetched together; the stages endpoint fails soft
   // to an empty funnel (the board degrades to an ALL-only view) so the tracker
   // still renders if the parent's states.yml is momentarily unreadable.
-  const [data, stagesData] = await Promise.all([
+  const [data, stagesData, commute] = await Promise.all([
     API.get('/api/tracker'),
     API.get('/api/tracker/stages').catch(() => ({ stages: [], aliases: {} })),
+    // Car commute per posting (homelab commute.mjs → data/commute.tsv); null = feature absent.
+    API.get('/api/commute').catch(() => null),
   ]);
   const rows = data.rows || [];
   const STAGES = Array.isArray(stagesData.stages) ? stagesData.stages : [];
@@ -24,6 +26,21 @@ Router.register('tracker', async () => {
   ]);
   // NEW-D3 (v1.58.38) — explicit aria-label so screen readers announce the
   // input's purpose (WCAG 4.1.2), the placeholder alone would not.
+  const urlKey = (u) => {
+    try { const x = new URL(u); return (x.host + x.pathname).replace(/\/+$/, '').toLowerCase(); } catch { return ''; }
+  };
+  const commuteOf = (r) => (commute && ((commute.byNum || {})[r.num] || (commute.byUrl || {})[urlKey(r.url)])) || null;
+  const hasCommute = !!(commute && (Object.keys(commute.byNum || {}).length || Object.keys(commute.byUrl || {}).length));
+  const maxMin = commute && commute.maxMinutes;
+  const upTo = (n) => t('commute.upTo', '≤ {n} min').replace('{n}', n);
+  const filterCommute = c('select', { className: 'select', style: { maxWidth: '200px' }, 'aria-label': t('commute.col.time', 'Drive') }, [
+    c('option', { value: '' }, t('commute.any', 'Any drive time')),
+    maxMin ? c('option', { value: String(maxMin) }, t('commute.max', '≤ {n} min (profile)').replace('{n}', maxMin)) : null,
+    ...[30, 45, 60, 90].filter((n) => n !== maxMin).map((n) => c('option', { value: String(n) }, upTo(n))),
+  ].filter(Boolean));
+  const showUnknown = c('input', { type: 'checkbox', checked: true });
+  const unknownLabel = c('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
+    [showUnknown, t('commute.unknown', 'Show unknown drive time')]);
   const filterText = c('input', {
     type: 'search',
     className: 'input',
@@ -96,6 +113,12 @@ Router.register('tracker', async () => {
       if (filterScore.value === '4' && (r.scoreNum ?? -1) < 4) continue;
       if (filterScore.value === '3' && (r.scoreNum ?? -1) < 3) continue;
       if (filterScore.value === '0' && (r.scoreNum ?? 0) >= 3) continue;
+      if (filterCommute.value) {
+        const cm = commuteOf(r);
+        // Remote always passes; unknown/unroutable only when the box is ticked.
+        if (!cm || cm.min == null) { if (!(cm && cm.precision === 'remote') && !showUnknown.checked) continue; }
+        else if (cm.min > Number(filterCommute.value)) continue;
+      }
       const q = filterText.value.toLowerCase().trim();
       // Search the PRESENTED identity too, so a confidential row is findable by
       // the agency in its Via column and not only by the literal '?'.
@@ -109,12 +132,13 @@ Router.register('tracker', async () => {
   }
 
   // v1.49.0 (WS2 #11) — client-side sort on date / score / status.
-  let sortKey = null;       // 'date' | 'score' | 'status' | null
+  let sortKey = null;       // 'date' | 'score' | 'status' | 'commute' | null
   let sortDir = 'asc';      // 'asc' | 'desc'
   function sorted(arr) {
     if (!sortKey) return arr;
     const dir = sortDir === 'asc' ? 1 : -1;
     const val = (r) => sortKey === 'score' ? (r.scoreNum ?? -1)
+      : sortKey === 'commute' ? (commuteOf(r)?.min ?? 9999)
       : sortKey === 'date' ? (r.date || '')
       : (r.status || '');
     return [...arr].sort((a, b) => {
@@ -134,12 +158,12 @@ Router.register('tracker', async () => {
       // WS2 #26 — distinguish first-run (no data at all) from a filter that
       // excluded everything; the former gets an actionable CTA.
       const emptyCell = rows.length === 0
-        ? c('td', { colspan: 9, style: { textAlign: 'center', padding: '40px', color: 'var(--foggy)' } }, [
+        ? c('td', { colspan: hasCommute ? 11 : 9, style: { textAlign: 'center', padding: '40px', color: 'var(--foggy)' } }, [
             c('strong', null, t('track.emptyTitle', 'No applications yet')),
             c('p', { style: { margin: '8px 0 0' } }, t('track.emptyBody', 'Run the pipeline or evaluate a JD to populate this tracker.')),
             c('a', { href: '#/pipeline', className: 'btn btn-primary btn-sm', style: { marginTop: '12px' } }, t('track.emptyCta', 'Open pipeline')),
           ])
-        : c('td', { colspan: 9, style: { textAlign: 'center', padding: '40px', color: 'var(--foggy)' } }, t('track.noMatch'));
+        : c('td', { colspan: hasCommute ? 11 : 9, style: { textAlign: 'center', padding: '40px', color: 'var(--foggy)' } }, t('track.noMatch'));
       tbody.appendChild(c('tr', null, emptyCell));
       return;
     }
@@ -178,9 +202,17 @@ Router.register('tracker', async () => {
     return th;
   }
   // Resetting the pager when filter inputs change keeps page-1 sticky.
-  ;[filterScore, filterText].forEach((el) =>
+  ;[filterScore, filterText, filterCommute, showUnknown].forEach((el) =>
     el.addEventListener('input', () => { pager.reset(); applyFilters(); })
   );
+  function commuteCell(cm) {
+    if (!cm) return c('td', { style: { color: 'var(--foggy)' } }, '—');
+    if (cm.precision === 'remote') return c('td', null, t('commute.remote', 'Remote'));
+    if (cm.min == null) return c('td', { style: { color: 'var(--foggy)' } }, '?');
+    const over = maxMin && cm.min > maxMin;
+    return c('td', { title: cm.km != null ? cm.km + ' km' : '', style: over ? { color: 'var(--danger, #d9534f)' } : null },
+      (over ? '⚠️ ' : '') + cm.min + ' min');
+  }
   function row(r) {
     // v1.128.0 — finer 4-tier tone (>=4.2/3.8/3.0) with a
     // letter-grade fallback, via the shared ScoreTone helper. Falls back to the
@@ -213,6 +245,8 @@ Router.register('tracker', async () => {
       c('td', null, r.date || ''),
       c('td', null, companyCell),
       c('td', null, r.role || ''),
+      hasCommute ? c('td', null, r.location && r.location !== '—' ? r.location : '—') : null,
+      hasCommute ? commuteCell(commuteOf(r)) : null,
       c('td', null, c('span', { className: 'score-pill ' + scoreCls }, r.score || '—')),
       // Status badge + (for ATS postings) a lazy "still live?" check. The
       // affordance is null for non-ATS rows, so most rows are unchanged.
@@ -295,8 +329,8 @@ Router.register('tracker', async () => {
     c('div', { className: 'card mb-3' }, [
       tabBar,
       c('div', { className: 'flex gap-3', style: { flexWrap: 'wrap' } }, [
-        filterScore, filterText,
-      ]),
+        filterScore, hasCommute ? filterCommute : null, hasCommute ? unknownLabel : null, filterText,
+      ].filter(Boolean)),
     ]),
 
     companyHistoryCard(rows, c, t),
@@ -308,6 +342,8 @@ Router.register('tracker', async () => {
           sortableTh(t('track.col.date'), 'date'),
           c('th', { scope: 'col' }, t('scan.col.company')),
           c('th', { scope: 'col' }, t('scan.col.role')),
+          hasCommute ? c('th', { scope: 'col' }, t('commute.col.place', 'Location')) : null,
+          hasCommute ? sortableTh(t('commute.col.time', 'Drive'), 'commute') : null,
           sortableTh(t('track.col.score', 'Score'), 'score'),
           sortableTh(t('track.col.status'), 'status'),
           c('th', { scope: 'col' }, [

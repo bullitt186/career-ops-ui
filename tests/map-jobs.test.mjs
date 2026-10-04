@@ -4,13 +4,13 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-let parsePipelineRows, buildLocationIndex, notesPlace;
+let parsePipelineRows, buildLocationIndex, notesPlace, parseCommute, urlKey;
 before(async () => {
   const root = mkdtempSync(join(tmpdir(), 'map-jobs-'));
   writeFileSync(join(root, 'cv.md'), '# CV\n');
   process.env.CAREER_OPS_ROOT = root;
   ({ parsePipelineRows } = await import('../server/lib/parsers.mjs'));
-  ({ buildLocationIndex, notesPlace } = await import('../server/lib/routes/map.mjs'));
+  ({ buildLocationIndex, notesPlace, parseCommute, urlKey } = await import('../server/lib/routes/map.mjs'));
 });
 
 test('parsePipelineRows: checklist rows carry company/title/location; local: rows link the note URL', () => {
@@ -64,4 +64,18 @@ test('tileConfig: OSM by default; MAP_TILE_URL drives URL and CSP origin; junk f
   assert.equal(tileConfig({ MAP_TILE_ATTRIBUTION: '<img src=x onerror=alert(1)>' }).attribution, '&#60;img src=x onerror=alert(1)&#62;');
   assert.equal(tileConfig({ MAP_TILE_URL: 'https://evil;script-src */x.png' }).origin, 'https://tile.openstreetmap.org');
   assert.equal(tileConfig({ MAP_TILE_URL: 'javascript:alert(1)//x' }).origin, 'https://tile.openstreetmap.org');
+});
+
+test('parseCommute: rows keyed by host+path, numbers parsed, empty cells null', () => {
+  const m = parseCommute([
+    'url\tlocation\tprecision\tlat\tlon\tkm\tmin\tchecked',
+    'https://www.linkedin.com/jobs/view/1/\tKarlsbad\tcity\t48.9\t8.5\t31\t34\t2026-10-04',
+    'https://e.com/remote\tRemote (DE)\tremote\t\t\t\t\t2026-10-04',
+    'not a url\tx\tcity\t1\t2\t3\t4\t2026-10-04',
+    '',
+  ].join('\n'));
+  assert.equal(m.size, 2);
+  assert.deepEqual(m.get('www.linkedin.com/jobs/view/1'), { min: 34, km: 31, precision: 'city', lat: 48.9, lon: 8.5 });
+  assert.deepEqual(m.get(urlKey('https://E.com/remote')), { min: null, km: null, precision: 'remote', lat: null, lon: null });
+  assert.equal(parseCommute('').size, 0);
 });
