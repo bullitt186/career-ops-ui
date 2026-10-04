@@ -105,9 +105,9 @@ export function tileConfig(env = process.env) {
   };
 }
 
-/** Host+path, lower-case, no trailing slash — the same key as the map client's urlKey(). */
+/** Host+path+query, lower-case, no trailing slash on the path — the same key as the map client's urlKey(). */
 export function urlKey(u) {
-  try { const x = new URL(u); return (x.host + x.pathname).replace(/\/+$/, '').toLowerCase(); } catch { return ''; }
+  try { const x = new URL(u); return ((x.host + x.pathname).replace(/\/+$/, '') + x.search).toLowerCase(); } catch { return ''; }
 }
 
 /** data/commute.tsv → Map(urlKey → {min, km, precision, lat, lon}); numbers or null. */

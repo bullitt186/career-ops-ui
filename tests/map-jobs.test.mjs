@@ -78,4 +78,5 @@ test('parseCommute: rows keyed by host+path, numbers parsed, empty cells null', 
   assert.deepEqual(m.get('www.linkedin.com/jobs/view/1'), { min: 34, km: 31, precision: 'city', lat: 48.9, lon: 8.5 });
   assert.deepEqual(m.get(urlKey('https://E.com/remote')), { min: null, km: null, precision: 'remote', lat: null, lon: null });
   assert.equal(parseCommute('').size, 0);
+  assert.notEqual(urlKey('https://b.io/jobs?gh_jid=1'), urlKey('https://b.io/jobs?gh_jid=2'));
 });

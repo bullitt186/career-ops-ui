@@ -27,7 +27,7 @@ Router.register('tracker', async () => {
   // NEW-D3 (v1.58.38) — explicit aria-label so screen readers announce the
   // input's purpose (WCAG 4.1.2), the placeholder alone would not.
   const urlKey = (u) => {
-    try { const x = new URL(u); return (x.host + x.pathname).replace(/\/+$/, '').toLowerCase(); } catch { return ''; }
+    try { const x = new URL(u); return ((x.host + x.pathname).replace(/\/+$/, '') + x.search).toLowerCase(); } catch { return ''; }
   };
   const commuteOf = (r) => (commute && ((commute.byNum || {})[r.num] || (commute.byUrl || {})[urlKey(r.url)])) || null;
   const hasCommute = !!(commute && (Object.keys(commute.byNum || {}).length || Object.keys(commute.byUrl || {}).length));

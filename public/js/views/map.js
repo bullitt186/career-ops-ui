@@ -33,7 +33,7 @@
   window.addEventListener('hashchange', () => { if (Router.current().name !== 'map') { gen++; drop(); } });
 
   const urlKey = (u) => {
-    try { const x = new URL(u); return (x.host + x.pathname).replace(/\/+$/, '').toLowerCase(); }
+    try { const x = new URL(u); return ((x.host + x.pathname).replace(/\/+$/, '') + x.search).toLowerCase(); }
     catch { return ''; }
   };
   const openUrl = (u) => (/^https?:\/\//i.test(u || '') ? () => window.open(u, '_blank', 'noopener') : null);
